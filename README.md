@@ -1,3 +1,13 @@
+---
+title: JournalMatch
+emoji: 🔬
+colorFrom: pink
+colorTo: purple
+sdk: docker
+pinned: false
+license: mit
+---
+
 # JournalMatch
 
 **AI-powered journal recommendation for biomedical scientists.**
