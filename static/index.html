@@ -19,6 +19,7 @@
   --amber:#f59e0b;
   --green:#10b981;
   --blue:#3b82f6;
+  --red:#ef4444;
   --text:#e2e8f0;
   --muted:#64748b;
   --muted2:#94a3b8;
@@ -232,6 +233,9 @@ header p{color:var(--muted2);font-size:.95rem;max-width:500px;margin:0 auto}
 .chip.paid{background:rgba(245,158,11,.08);border-color:rgba(245,158,11,.25);color:var(--amber)}
 .chip.author{background:rgba(129,140,248,.1);border-color:rgba(129,140,248,.3);color:var(--purple)}
 .chip.topic{background:#101c2e;border-color:var(--border);color:var(--muted2)}
+.chip.wc-fit{background:rgba(16,185,129,.1);border-color:rgba(16,185,129,.3);color:var(--green)}
+.chip.wc-ok{background:rgba(20,184,166,.08);border-color:rgba(20,184,166,.25);color:var(--teal)}
+.chip.wc-over{background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.3);color:#fca5a5}
 
 /* Timeline & acceptance */
 .bottom-row{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-top:.6rem}
@@ -284,6 +288,11 @@ header p{color:var(--muted2);font-size:.95rem;max-width:500px;margin:0 auto}
 .table-link{color:var(--teal);font-size:.75rem}
 .oa-yes{color:var(--teal)}
 .oa-no{color:var(--muted)}
+.wc-fit-cell{font-size:.72rem}
+.wc-fit-cell.well_within{color:var(--green)}
+.wc-fit-cell.fits{color:var(--teal)}
+.wc-fit-cell.over{color:#fca5a5}
+.wc-fit-cell.unknown{color:var(--muted)}
 
 .table-scroll{overflow-x:auto}
 
@@ -326,18 +335,18 @@ footer{
   <div class="form-group">
     <label>Abstract *</label>
     <textarea id="abstract" placeholder="Paste your complete abstract here..."></textarea>
-    <div class="hint">Full abstract recommended — more text gives better topic matching</div>
+    <div class="hint">Full abstract recommended — more text gives better topic matching. Short abstracts (150+ words) are supported.</div>
   </div>
   <div class="author-row">
     <div class="form-group">
-      <label>First Author</label>
-      <input type="text" id="firstAuthor" placeholder="e.g. Smith J"/>
-      <div class="hint">Surname + initials (PubMed format)</div>
-    </div>
-    <div class="form-group">
       <label>Last / Corresponding Author</label>
       <input type="text" id="lastAuthor" placeholder="e.g. Jones B"/>
-      <div class="hint">Weighted higher in scoring (7% vs 3%)</div>
+      <div class="hint">Surname + initials (PubMed format) — boosts score if they've published in a journal</div>
+    </div>
+    <div class="form-group">
+      <label>Manuscript Word Count <span style="color:var(--muted);font-weight:400;text-transform:none">(optional)</span></label>
+      <input type="number" id="wordCount" placeholder="e.g. 4500" min="100" max="50000"/>
+      <div class="hint">Enter your full paper word count to see which journals fit your length</div>
     </div>
   </div>
   <button class="btn-analyze" id="analyzeBtn" onclick="runAnalysis()">
@@ -352,7 +361,7 @@ footer{
 <div id="loading">
   <div class="spinner"></div>
   <div class="steps">
-    <div class="step" id="s1"><div class="step-dot"></div>Fetching candidate papers from OpenAlex (200 abstracts)…</div>
+    <div class="step" id="s1"><div class="step-dot"></div>Fetching candidate papers from OpenAlex…</div>
     <div class="step" id="s2"><div class="step-dot"></div>Computing SPECTER embeddings &amp; ranking by semantic similarity…</div>
     <div class="step" id="s3"><div class="step-dot"></div>Scanning PubMed for editorial &amp; call-for-papers signals…</div>
     <div class="step" id="s4"><div class="step-dot"></div>Checking author publication history…</div>
@@ -416,6 +425,8 @@ footer{
             <th>Open Access</th>
             <th>APC (USD)</th>
             <th>Acceptance Rate</th>
+            <th>Word Limit</th>
+            <th>Your Word Count Fit</th>
             <th>Timeline</th>
             <th>Submit</th>
           </tr>
@@ -428,14 +439,14 @@ footer{
 </div><!-- /results -->
 
 <footer>
-  JournalMatch · Data from PubMed (NCBI), OpenAlex &amp; Crossref · For research guidance only
+  JournalMatch · Data from PubMed (NCBI), OpenAlex &amp; Crossref · For research guidance only<br>
+  <span style="font-size:.7rem;margin-top:.3rem;display:block">This is a vibe coding project — ideas &amp; suggestions by Amulya Shastry, coded by Claude Code. AI can make mistakes; verify before submitting.</span>
 </footer>
 
 </div><!-- /page -->
 
 <script>
 let chartInstance = null;
-let stepTimer = null;
 let elapsedTimer = null;
 let startTime = null;
 const STEP_IDS = ['s1','s2','s3','s4','s5'];
@@ -488,12 +499,13 @@ function showError(msg) {
 }
 
 async function runAnalysis() {
-  const abstract = document.getElementById('abstract').value.trim();
-  const firstAuthor = document.getElementById('firstAuthor').value.trim();
+  const abstract   = document.getElementById('abstract').value.trim();
   const lastAuthor = document.getElementById('lastAuthor').value.trim();
+  const wordCountRaw = document.getElementById('wordCount').value.trim();
+  const wordCount  = wordCountRaw ? parseInt(wordCountRaw, 10) : null;
 
   if (!abstract) { showError('Please paste your abstract.'); return; }
-  if (abstract.length < 80) { showError('Abstract is too short. Please provide the full text.'); return; }
+  if (abstract.length < 50) { showError('Abstract is too short. Please provide at least a few sentences.'); return; }
 
   showLoading();
 
@@ -501,18 +513,18 @@ async function runAnalysis() {
     const resp = await fetch('/api/analyze', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({abstract, first_author: firstAuthor, last_author: lastAuthor}),
+      body: JSON.stringify({abstract, last_author: lastAuthor, word_count: wordCount}),
     });
     const data = await resp.json();
     if (!resp.ok) { showError(data.error || 'Analysis failed. Please try again.'); return; }
     hideLoading();
-    renderResults(data);
+    renderResults(data, wordCount);
   } catch (e) {
     showError('Network error — is the server running? ' + e.message);
   }
 }
 
-function renderResults(data) {
+function renderResults(data, wordCount) {
   const {results, keywords, total_similar_works} = data;
 
   // Summary strip
@@ -520,10 +532,14 @@ function renderResults(data) {
   const methodLabel = data.similarity_method === 'SPECTER'
     ? '🧠 SPECTER semantic embeddings'
     : '🔑 Keyword fallback (install sentence-transformers for embeddings)';
+  const wcChip = wordCount
+    ? `<span class="summary-chip">📝 Manuscript: ${wordCount.toLocaleString()} words</span>`
+    : '';
   strip.innerHTML = `
     <span class="summary-chip">📄 ${total_similar_works} papers retrieved</span>
     <span class="summary-chip">🏆 Top ${results.length} journals</span>
     <span class="summary-chip" style="color:var(--teal)">${methodLabel}</span>
+    ${wcChip}
     ${keywords.map(k => `<span class="kw-chip">${k}</span>`).join('')}
   `;
 
@@ -535,16 +551,10 @@ function renderResults(data) {
   document.getElementById('modCount').textContent  = mod;
   document.getElementById('lowCount').textContent  = low;
 
-  // Chart
   renderChart(results);
-
-  // Cards
   renderCards(results);
-
-  // Table
   renderTable(results);
 
-  // Show results
   document.getElementById('results').style.display = 'block';
   document.getElementById('results').scrollIntoView({behavior:'smooth', block:'start'});
 }
@@ -566,8 +576,6 @@ function renderChart(results) {
   const simData  = results.map(r => r.similarity_score);
   const edData   = results.map(r => r.editorial_score);
   const auData   = results.map(r => r.author_score);
-  const bgColors = results.map(r => catColor(r.category, 0.15));
-  const borderColors = results.map(r => catColor(r.category, 0.6));
 
   const ctx = document.getElementById('journalChart').getContext('2d');
   chartInstance = new Chart(ctx, {
@@ -607,9 +615,7 @@ function renderChart(results) {
       maintainAspectRatio: false,
       animation: {duration: 800, easing: 'easeOutQuart'},
       plugins: {
-        legend: {
-          display: false,
-        },
+        legend: {display: false},
         tooltip: {
           backgroundColor: '#0f1e33',
           borderColor: '#1e3354',
@@ -617,12 +623,13 @@ function renderChart(results) {
           titleColor: '#e2e8f0',
           bodyColor: '#94a3b8',
           callbacks: {
-            title: (items) => {
-              const r = results[items[0].dataIndex];
-              return r.name;
-            },
+            title: (items) => results[items[0].dataIndex].name,
             afterBody: (items) => {
               const r = results[items[0].dataIndex];
+              const wf = r.word_fit;
+              const wcLine = wf && wf.status !== 'unknown'
+                ? [`  Word Limit    : ${r.word_limit ? r.word_limit.toLocaleString() : '—'}`, `  WC Fit        : ${wf.label}`]
+                : [];
               return [
                 '',
                 `  Similarity    : ${r.similarity_score} / 70`,
@@ -631,6 +638,7 @@ function renderChart(results) {
                 `  ─────────────────────`,
                 `  TOTAL         : ${r.total_score} / 100`,
                 `  Category      : ${r.category.toUpperCase()} CHANCE`,
+                ...wcLine,
               ];
             },
           },
@@ -638,9 +646,7 @@ function renderChart(results) {
       },
       scales: {
         x: {
-          stacked: true,
-          min: 0,
-          max: 100,
+          stacked: true, min: 0, max: 100,
           grid: {color: 'rgba(30,51,84,0.8)'},
           ticks: {color: '#64748b', font: {size: 11}},
           title: {display: true, text: 'Match Score (0 – 100)', color: '#64748b', font: {size: 11}},
@@ -656,12 +662,10 @@ function renderChart(results) {
       id: 'categoryBands',
       beforeDraw(chart) {
         const {ctx: c, chartArea: {left, right, top, bottom}, scales: {x}} = chart;
-        // High band (65-100)
         const x65 = x.getPixelForValue(65);
         c.save();
         c.fillStyle = 'rgba(16,185,129,0.04)';
         c.fillRect(x65, top, right - x65, bottom - top);
-        // Moderate band (45-65)
         const x45 = x.getPixelForValue(45);
         c.fillStyle = 'rgba(245,158,11,0.04)';
         c.fillRect(x45, top, x65 - x45, bottom - top);
@@ -669,7 +673,6 @@ function renderChart(results) {
       },
     }],
   });
-  // Make canvas height dynamic based on results count
   document.getElementById('journalChart').style.height = Math.max(360, results.length * 50) + 'px';
 }
 
@@ -694,23 +697,25 @@ function scoreRing(score, cat, rank) {
   `;
 }
 
+function wordFitChip(wf, wordLimit) {
+  if (!wf || wf.status === 'unknown') return '';
+  const icons = {well_within: '✓✓', fits: '✓', over: '⚠'};
+  const classes = {well_within: 'chip wc-fit', fits: 'chip wc-ok', over: 'chip wc-over'};
+  const limitStr = wordLimit ? ` (limit: ${wordLimit.toLocaleString()})` : '';
+  return `<span class="${classes[wf.status]}">${icons[wf.status]} ${wf.label}</span>`;
+}
+
 function authorBadge(r) {
-  if (r.last_author_published && r.first_author_published) {
-    return `<span class="chip author">✓ Both authors published here</span>`;
-  } else if (r.last_author_published) {
-    return `<span class="chip author">✓ Last author published here</span>`;
-  } else if (r.first_author_published) {
-    return `<span class="chip author">✓ First author published here</span>`;
+  if (r.last_author_published) {
+    return `<span class="chip author">✓ Corresponding author published here</span>`;
   }
   return '';
 }
 
 function timelineVisual(weeks) {
   if (!weeks) return '';
-  const submit = 0;
-  const review = Math.round(weeks * 0.55);
+  const review   = Math.round(weeks * 0.55);
   const decision = Math.round(weeks * 0.75);
-  const pub = weeks;
   return `
     <div class="timeline-visual">
       <div class="tl-node">
@@ -734,7 +739,7 @@ function timelineVisual(weeks) {
       <div class="tl-node">
         <div class="tl-dot" style="background:var(--green)"></div>
         <div class="tl-label">Publication</div>
-        <div class="tl-weeks" style="color:var(--green)">wk ${pub}</div>
+        <div class="tl-weeks" style="color:var(--green)">wk ${weeks}</div>
       </div>
     </div>
   `;
@@ -743,9 +748,9 @@ function timelineVisual(weeks) {
 function renderCards(results) {
   const container = document.getElementById('journalCards');
   const groups = [
-    {key: 'high',     label: '🟢 High Chance',     cls: 'high'},
-    {key: 'moderate', label: '🟡 Moderate Chance',  cls: 'moderate'},
-    {key: 'low',      label: '🔵 Low Chance',       cls: 'low'},
+    {key: 'high',     label: '🟢 High Chance',    cls: 'high'},
+    {key: 'moderate', label: '🟡 Moderate Chance', cls: 'moderate'},
+    {key: 'low',      label: '🔵 Low Chance',      cls: 'low'},
   ];
 
   let html = '';
@@ -761,12 +766,12 @@ function renderCards(results) {
         </div>
     `;
 
-    group.forEach((r, gi) => {
-      const rank = results.indexOf(r) + 1;
+    group.forEach(r => {
+      const rank    = results.indexOf(r) + 1;
       const simPct  = Math.round((r.similarity_score / 70) * 100);
       const edPct   = Math.round((r.editorial_score / 20) * 100);
       const auPct   = Math.round((r.author_score / 10) * 100);
-      const homepage = r.homepage || '#';
+      const homepage  = r.homepage || '#';
       const submitUrl = r.submission_url || r.homepage || '#';
 
       html += `
@@ -802,6 +807,7 @@ function renderCards(results) {
               ${r.is_oa ? `<span class="chip oa">Open Access</span>` : '<span class="chip">Subscription</span>'}
               ${r.apc_usd ? `<span class="chip paid">APC $${r.apc_usd.toLocaleString()}</span>` : ''}
               ${authorBadge(r)}
+              ${wordFitChip(r.word_fit, r.word_limit)}
             </div>
 
             ${r.topics.length ? `
@@ -839,6 +845,12 @@ function catLabel(cat) {
   return '▼ Low';
 }
 
+function wcFitCell(wf) {
+  if (!wf || wf.status === 'unknown') return '<span class="wc-fit-cell unknown">—</span>';
+  const icons = {well_within: '✓✓', fits: '✓', over: '⚠'};
+  return `<span class="wc-fit-cell ${wf.status}">${icons[wf.status]} ${wf.label}</span>`;
+}
+
 function renderTable(results) {
   const tbody = document.getElementById('reqBody');
   tbody.innerHTML = results.map((r, i) => {
@@ -857,6 +869,8 @@ function renderTable(results) {
         <td class="${r.is_oa ? 'oa-yes' : 'oa-no'}">${r.is_oa ? '✓ Yes' : 'No'}</td>
         <td>${r.apc_usd ? '$' + r.apc_usd.toLocaleString() : (r.is_oa ? 'Check site' : '—')}</td>
         <td>${r.acceptance_rate}</td>
+        <td style="color:var(--muted2)">${r.word_limit ? r.word_limit.toLocaleString() + ' words' : '—'}</td>
+        <td>${wcFitCell(r.word_fit)}</td>
         <td>${r.timeline_label}</td>
         <td><a href="${submitUrl}" target="_blank" rel="noopener" class="table-link">Guidelines →</a></td>
       </tr>
@@ -864,7 +878,6 @@ function renderTable(results) {
   }).join('');
 }
 
-// Allow Enter in abstract to not submit — textarea keeps newlines
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.ctrlKey) runAnalysis();
 });

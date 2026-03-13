@@ -2,7 +2,8 @@
 JournalMatch — Biomedical Journal Recommendation Tool
 Similarity: SPECTER (scientific paper embeddings) via sentence-transformers
 Editorial: PubMed editorial/perspective search
-Author history: PubMed asymmetric author scoring (last=7%, first=3%)
+Author history: PubMed last-author scoring (last=7%)
+Word count: Manuscript length match against journal word limits
 """
 
 import re
@@ -14,8 +15,6 @@ import requests
 from flask import Flask, request, jsonify, send_from_directory
 
 # ── Load SPECTER model once at startup ────────────────────────────────────────
-# SPECTER is trained specifically on scientific paper citation contexts.
-# First run downloads ~420 MB to ~/.cache/huggingface; subsequent runs load instantly.
 try:
     from sentence_transformers import SentenceTransformer
     print("[JournalMatch] Loading SPECTER embedding model...")
@@ -38,237 +37,238 @@ NCBI_PARAMS = {"tool": "JournalMatch", "email": "journalmatch@example.com"}
 OA_HEADERS  = {"User-Agent": "JournalMatch/1.0 (mailto:journalmatch@example.com)"}
 
 # ── Reference Data ────────────────────────────────────────────────────────────
+# word_limit: typical maximum words for an original research article
 JOURNAL_REF = {
     "new england journal of medicine": {
-        "acceptance_rate": "~5%", "timeline_weeks": 5,
+        "acceptance_rate": "~5%", "timeline_weeks": 5, "word_limit": 3000,
         "submission_url": "https://www.nejm.org/author-center/new-manuscripts",
     },
     "lancet": {
-        "acceptance_rate": "~5%", "timeline_weeks": 6,
+        "acceptance_rate": "~5%", "timeline_weeks": 6, "word_limit": 3000,
         "submission_url": "https://www.thelancet.com/authors",
     },
     "jama": {
-        "acceptance_rate": "~5%", "timeline_weeks": 6,
+        "acceptance_rate": "~5%", "timeline_weeks": 6, "word_limit": 3000,
         "submission_url": "https://jamanetwork.com/journals/jama/pages/instructions-for-authors",
     },
     "bmj": {
-        "acceptance_rate": "~7%", "timeline_weeks": 8,
+        "acceptance_rate": "~7%", "timeline_weeks": 8, "word_limit": 3000,
         "submission_url": "https://www.bmj.com/about-bmj/resources-authors",
     },
     "nature medicine": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 4000,
         "submission_url": "https://www.nature.com/nm/submission-guidelines",
     },
     "nature": {
-        "acceptance_rate": "~7%", "timeline_weeks": 12,
+        "acceptance_rate": "~7%", "timeline_weeks": 12, "word_limit": 3000,
         "submission_url": "https://www.nature.com/nature/for-authors",
     },
     "science": {
-        "acceptance_rate": "~7%", "timeline_weeks": 10,
+        "acceptance_rate": "~7%", "timeline_weeks": 10, "word_limit": 3000,
         "submission_url": "https://www.science.org/content/page/science-information-authors",
     },
     "cell": {
-        "acceptance_rate": "~7%", "timeline_weeks": 10,
+        "acceptance_rate": "~7%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/cell/authors",
     },
     "plos one": {
-        "acceptance_rate": "~69%", "timeline_weeks": 6,
+        "acceptance_rate": "~69%", "timeline_weeks": 6, "word_limit": 10000,
         "submission_url": "https://journals.plos.org/plosone/s/submission-guidelines",
     },
     "nature communications": {
-        "acceptance_rate": "~30%", "timeline_weeks": 8,
+        "acceptance_rate": "~30%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.nature.com/ncomms/submission-guidelines",
     },
     "scientific reports": {
-        "acceptance_rate": "~50%", "timeline_weeks": 6,
+        "acceptance_rate": "~50%", "timeline_weeks": 6, "word_limit": 10000,
         "submission_url": "https://www.nature.com/srep/submission-guidelines",
     },
     "elife": {
-        "acceptance_rate": "~14%", "timeline_weeks": 10,
+        "acceptance_rate": "~14%", "timeline_weeks": 10, "word_limit": 12000,
         "submission_url": "https://elifesciences.org/author-guide",
     },
     "proceedings of the national academy of sciences": {
-        "acceptance_rate": "~17%", "timeline_weeks": 8,
+        "acceptance_rate": "~17%", "timeline_weeks": 8, "word_limit": 6000,
         "submission_url": "https://www.pnas.org/page/authors/submission",
     },
     "pnas": {
-        "acceptance_rate": "~17%", "timeline_weeks": 8,
+        "acceptance_rate": "~17%", "timeline_weeks": 8, "word_limit": 6000,
         "submission_url": "https://www.pnas.org/page/authors/submission",
     },
     "immunity": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/immunity/authors",
     },
     "cancer cell": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/cancer-cell/authors",
     },
     "molecular cell": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/molecular-cell/authors",
     },
     "cell metabolism": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/cell-metabolism/authors",
     },
     "cell host & microbe": {
-        "acceptance_rate": "~12%", "timeline_weeks": 10,
+        "acceptance_rate": "~12%", "timeline_weeks": 10, "word_limit": 7000,
         "submission_url": "https://www.cell.com/cell-host-microbe/authors",
     },
     "cell host and microbe": {
-        "acceptance_rate": "~12%", "timeline_weeks": 10,
+        "acceptance_rate": "~12%", "timeline_weeks": 10, "word_limit": 7000,
         "submission_url": "https://www.cell.com/cell-host-microbe/authors",
     },
     "cell reports": {
-        "acceptance_rate": "~25%", "timeline_weeks": 8,
+        "acceptance_rate": "~25%", "timeline_weeks": 8, "word_limit": 7000,
         "submission_url": "https://www.cell.com/cell-reports/authors",
     },
     "journal of clinical investigation": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 7000,
         "submission_url": "https://www.jci.org/authors/instructions",
     },
     "jci insight": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 7000,
         "submission_url": "https://insight.jci.org/authors/instructions",
     },
     "annals of internal medicine": {
-        "acceptance_rate": "~5%", "timeline_weeks": 6,
+        "acceptance_rate": "~5%", "timeline_weeks": 6, "word_limit": 3500,
         "submission_url": "https://www.acpjournals.org/journal/aim/authors",
     },
     "circulation": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.ahajournals.org/journal/circ/author-instructions",
     },
     "jacc": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.jacc.org/author-center",
     },
     "gastroenterology": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.gastrojournal.org/content/authorinfo",
     },
     "gut": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 4500,
         "submission_url": "https://gut.bmj.com/pages/authors",
     },
     "hepatology": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://aasldpubs.onlinelibrary.wiley.com/hub/journal/15273350/homepage/forauthors.html",
     },
     "blood": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.hematology.org/publications/blood/authors",
     },
     "neuron": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/neuron/authors",
     },
     "nature neuroscience": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 4000,
         "submission_url": "https://www.nature.com/neuro/submission-guidelines",
     },
     "journal of neuroscience": {
-        "acceptance_rate": "~25%", "timeline_weeks": 8,
+        "acceptance_rate": "~25%", "timeline_weeks": 8, "word_limit": 15000,
         "submission_url": "https://www.jneurosci.org/content/information-authors",
     },
     "brain": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://academic.oup.com/brain/pages/general-instructions",
     },
     "cancer research": {
-        "acceptance_rate": "~25%", "timeline_weeks": 6,
+        "acceptance_rate": "~25%", "timeline_weeks": 6, "word_limit": 7000,
         "submission_url": "https://aacrjournals.org/cancerres/pages/instructions-for-authors",
     },
     "cancer discovery": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 6000,
         "submission_url": "https://aacrjournals.org/cancerdiscovery/pages/instructions-for-authors",
     },
     "journal of clinical oncology": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://ascopubs.org/jco/authors",
     },
     "annals of oncology": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://www.annalsofoncology.org/authors",
     },
     "nature cancer": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 5000,
         "submission_url": "https://www.nature.com/natcancer/submission-guidelines",
     },
     "american journal of respiratory and critical care medicine": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 4000,
         "submission_url": "https://www.atsjournals.org/page/ajrccm/submission",
     },
     "chest": {
-        "acceptance_rate": "~20%", "timeline_weeks": 6,
+        "acceptance_rate": "~20%", "timeline_weeks": 6, "word_limit": 4000,
         "submission_url": "https://journal.chestnet.org/authors",
     },
     "european respiratory journal": {
-        "acceptance_rate": "~18%", "timeline_weeks": 10,
+        "acceptance_rate": "~18%", "timeline_weeks": 10, "word_limit": 4000,
         "submission_url": "https://erj.ersjournals.com/pages/authors",
     },
     "radiology": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 3500,
         "submission_url": "https://pubs.rsna.org/page/radiology/submission",
     },
     "plos medicine": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 5000,
         "submission_url": "https://journals.plos.org/plosmedicine/s/submission-guidelines",
     },
     "plos biology": {
-        "acceptance_rate": "~12%", "timeline_weeks": 10,
+        "acceptance_rate": "~12%", "timeline_weeks": 10, "word_limit": 7500,
         "submission_url": "https://journals.plos.org/plosbiology/s/submission-guidelines",
     },
     "nature biotechnology": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 4000,
         "submission_url": "https://www.nature.com/nbt/submission-guidelines",
     },
     "nature genetics": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 4000,
         "submission_url": "https://www.nature.com/ng/submission-guidelines",
     },
     "genome biology": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 8000,
         "submission_url": "https://genomebiology.biomedcentral.com/submission-guidelines",
     },
     "genome research": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 8000,
         "submission_url": "https://genome.cshlp.org/misc/ifora.shtml",
     },
     "american journal of human genetics": {
-        "acceptance_rate": "~15%", "timeline_weeks": 8,
+        "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5500,
         "submission_url": "https://www.cell.com/ajhg/authors",
     },
     "nature chemical biology": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 3500,
         "submission_url": "https://www.nature.com/nchembio/submission-guidelines",
     },
     "journal of experimental medicine": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://rupress.org/jem/pages/manuscript-preparation",
     },
     "nature immunology": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 5000,
         "submission_url": "https://www.nature.com/ni/submission-guidelines",
     },
     "journal of allergy and clinical immunology": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 6000,
         "submission_url": "https://www.jacionline.org/content/authorinfo",
     },
     "diabetes": {
-        "acceptance_rate": "~20%", "timeline_weeks": 8,
+        "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 5000,
         "submission_url": "https://diabetes.diabetesjournals.org/content/information-for-authors",
     },
     "nature metabolism": {
-        "acceptance_rate": "~8%", "timeline_weeks": 10,
+        "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 5000,
         "submission_url": "https://www.nature.com/natmetab/submission-guidelines",
     },
     "cell stem cell": {
-        "acceptance_rate": "~10%", "timeline_weeks": 10,
+        "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
         "submission_url": "https://www.cell.com/cell-stem-cell/authors",
     },
     "stem cell reports": {
-        "acceptance_rate": "~25%", "timeline_weeks": 8,
+        "acceptance_rate": "~25%", "timeline_weeks": 8, "word_limit": 7000,
         "submission_url": "https://www.cell.com/stem-cell-reports/authors",
     },
 }
@@ -319,16 +319,43 @@ def get_ref(journal_name: str) -> dict:
     for ref_key, ref_val in JOURNAL_REF.items():
         if ref_key in key or key in ref_key:
             return ref_val
-    return {"acceptance_rate": "See journal website", "timeline_weeks": None, "submission_url": None}
+    return {
+        "acceptance_rate": "See journal website",
+        "timeline_weeks": None,
+        "word_limit": None,
+        "submission_url": None,
+    }
+
+
+def compute_word_fit(word_count: int, word_limit: int | None) -> dict:
+    """Return fit status for a manuscript word count against a journal's word limit."""
+    if not word_count or not word_limit:
+        return {"status": "unknown", "label": "—", "pct": None}
+    pct = round(word_count / word_limit * 100)
+    if word_count <= word_limit:
+        if word_count <= word_limit * 0.7:
+            return {
+                "status": "well_within",
+                "label": f"Well within limit ({word_count:,} / {word_limit:,} words)",
+                "pct": pct,
+            }
+        return {
+            "status": "fits",
+            "label": f"Within limit ({word_count:,} / {word_limit:,} words)",
+            "pct": pct,
+        }
+    over = word_count - word_limit
+    return {
+        "status": "over",
+        "label": f"Exceeds by {over:,} words ({word_count:,} / {word_limit:,} limit)",
+        "pct": pct,
+    }
 
 
 # ── SPECTER Embedding Helpers ─────────────────────────────────────────────────
 
 def reconstruct_abstract(inv_idx: dict) -> str:
-    """
-    Convert OpenAlex abstract_inverted_index to plain text.
-    Format: {"word": [pos, pos, ...], ...}
-    """
+    """Convert OpenAlex abstract_inverted_index to plain text."""
     if not inv_idx:
         return ""
     pos_map: dict[int, str] = {}
@@ -340,12 +367,9 @@ def reconstruct_abstract(inv_idx: dict) -> str:
     return " ".join(pos_map[i] for i in sorted(pos_map))
 
 
-def fetch_papers_with_abstracts(query: str, n_pages: int = 4) -> list[dict]:
-    """
-    Fetch up to n_pages × 50 papers from OpenAlex that have full abstract text.
-    Returns raw OpenAlex work objects.
-    """
-    all_works: list[dict] = []
+def fetch_papers_openalex(query: str, n_pages: int = 4) -> list[dict]:
+    """Fetch up to n_pages × 50 papers from OpenAlex matching the query."""
+    works: list[dict] = []
     for page in range(1, n_pages + 1):
         params = {
             "search": query,
@@ -364,13 +388,59 @@ def fetch_papers_with_abstracts(query: str, n_pages: int = 4) -> list[dict]:
                              headers=OA_HEADERS, timeout=30)
             if r.status_code == 200:
                 results = r.json().get("results", [])
-                all_works.extend(results)
+                works.extend(results)
                 if len(results) < 50:
                     break
         except Exception as e:
             print(f"[OpenAlex fetch] page {page}: {e}")
             break
         time.sleep(0.15)
+    return works
+
+
+def fetch_papers_with_abstracts(abstract: str, keywords: list[str]) -> list[dict]:
+    """
+    Three-query retrieval for robustness with short or novel abstracts:
+      1. Primary query: first 500 chars of abstract (BM25 on full text).
+      2. Keyword query: always runs to supplement primary results.
+      3. Broad keyword query: individual top keywords if still sparse.
+    Deduplicates by OpenAlex work ID.
+    """
+    seen_ids: set[str] = set()
+    all_works: list[dict] = []
+
+    # Primary: abstract text (capped at 500 chars to avoid URL length issues)
+    primary_query = abstract[:500].strip()
+    if primary_query:
+        primary = fetch_papers_openalex(primary_query, n_pages=4)
+        for w in primary:
+            wid = w.get("id", "")
+            if wid and wid not in seen_ids:
+                seen_ids.add(wid)
+                all_works.append(w)
+
+    # Always run keyword query — critical for short abstracts (< 150 words)
+    if keywords:
+        kw_query = " ".join(keywords[:8])
+        supplemental = fetch_papers_openalex(kw_query, n_pages=4)
+        for w in supplemental:
+            wid = w.get("id", "")
+            if wid and wid not in seen_ids:
+                seen_ids.add(wid)
+                all_works.append(w)
+
+    # Third pass with individual top keywords if still sparse
+    if len(all_works) < 30 and keywords:
+        for kw in keywords[:4]:
+            extra = fetch_papers_openalex(kw, n_pages=2)
+            for w in extra:
+                wid = w.get("id", "")
+                if wid and wid not in seen_ids:
+                    seen_ids.add(wid)
+                    all_works.append(w)
+            if len(all_works) >= 50:
+                break
+
     return all_works
 
 
@@ -383,13 +453,6 @@ def specter_journal_scores(
       1. Encode user abstract + all retrieved paper abstracts with SPECTER.
       2. Compute cosine similarity between user abstract and every paper.
       3. For each journal: take mean of its top-5 paper similarities → journal score.
-
-    SPECTER input convention: "title [SEP] abstract"
-    For user (no title): "[SEP] <abstract>"
-
-    Returns:
-      journal_scores : {openalex_source_id: float}   (0–1 cosine sim)
-      journal_meta   : {openalex_source_id: {name, homepage, issn}}
     """
     texts: list[str] = []
     paper_jids: list[str] = []
@@ -398,11 +461,11 @@ def specter_journal_scores(
     for work in works:
         inv = work.get("abstract_inverted_index") or {}
         abstract_text = reconstruct_abstract(inv)
-        if not abstract_text or len(abstract_text) < 50:
+        # Lowered threshold so short-text papers still contribute
+        if not abstract_text or len(abstract_text) < 10:
             continue
 
         title = work.get("title") or ""
-        # SPECTER input: "title [SEP] abstract"
         specter_text = f"{title} [SEP] {abstract_text}"
 
         loc = work.get("primary_location") or {}
@@ -425,11 +488,9 @@ def specter_journal_scores(
     if not texts:
         return {}, {}
 
-    # User abstract: no title available, use "[SEP] <abstract>"
     user_text = f"[SEP] {user_abstract}"
     all_texts = [user_text] + texts
 
-    # Batch encode — normalize_embeddings=True → cosine sim = dot product
     embeddings: np.ndarray = SPECTER.encode(
         all_texts,
         batch_size=32,
@@ -438,13 +499,10 @@ def specter_journal_scores(
         normalize_embeddings=True,
     )
 
-    user_emb  = embeddings[0]          # shape (768,)
-    paper_emb = embeddings[1:]         # shape (N, 768)
+    user_emb  = embeddings[0]
+    paper_emb = embeddings[1:]
+    sims: np.ndarray = paper_emb @ user_emb
 
-    # Cosine similarities (dot product since L2-normalised)
-    sims: np.ndarray = paper_emb @ user_emb   # shape (N,)
-
-    # Aggregate per journal: mean of top-5 most similar papers
     journal_sim_lists: dict[str, list[float]] = defaultdict(list)
     for i, jid in enumerate(paper_jids):
         journal_sim_lists[jid].append(float(sims[i]))
@@ -460,10 +518,7 @@ def specter_journal_scores(
 def keyword_journal_scores_fallback(
     works: list[dict],
 ) -> tuple[dict[str, float], dict[str, dict]]:
-    """
-    Fallback when SPECTER is unavailable: aggregate journals by BM25 rank
-    (position in OpenAlex result set acts as a relevance proxy).
-    """
+    """Fallback when SPECTER is unavailable: rank journals by BM25 position."""
     journal_weights: dict[str, float] = defaultdict(float)
     journal_meta: dict[str, dict] = {}
 
@@ -483,7 +538,6 @@ def keyword_journal_scores_fallback(
                 "oa_id":    jid,
             }
 
-    # Normalise to 0–1
     max_w = max(journal_weights.values()) if journal_weights else 1.0
     journal_scores = {jid: w / max_w for jid, w in journal_weights.items()}
     return journal_scores, journal_meta
@@ -580,38 +634,35 @@ def openalex_topic_overlap(source_data: dict, keywords: list[str]) -> float:
 
 # ── Main Analysis ──────────────────────────────────────────────────────────────
 
-def analyze(abstract: str, first_author: str, last_author: str) -> dict:
+def analyze(abstract: str, last_author: str, word_count: int | None) -> dict:
     keywords = extract_keywords(abstract, n=12)
 
-    # ── Step 1: Retrieve candidate papers from OpenAlex ───────────────────────
-    # Use the full abstract (first 500 chars) as the OpenAlex BM25 query.
-    # This gives us a broad pool of relevant papers; SPECTER then re-ranks them.
-    papers = fetch_papers_with_abstracts(abstract[:500], n_pages=4)  # up to 200 papers
-
+    # ── Step 1: Retrieve candidate papers (two-query approach) ────────────────
+    papers = fetch_papers_with_abstracts(abstract, keywords)
     total_papers = len(papers)
 
     # ── Step 2: Compute embedding-based journal scores ────────────────────────
     if EMBEDDING_OK and papers:
         raw_scores, oa_meta = specter_journal_scores(abstract, papers)
         similarity_method = "SPECTER"
-    else:
+    elif papers:
         raw_scores, oa_meta = keyword_journal_scores_fallback(papers)
+        similarity_method = "keyword_fallback"
+    else:
+        raw_scores, oa_meta = {}, {}
         similarity_method = "keyword_fallback"
 
     print(f"[JournalMatch] Similarity method: {similarity_method}, "
           f"{len(raw_scores)} candidate journals from {total_papers} papers")
 
     if not raw_scores:
-        return {"results": [], "keywords": keywords, "total_similar_works": 0}
+        return {"results": [], "keywords": keywords, "total_similar_works": 0,
+                "similarity_method": similarity_method}
 
-    # ── Step 3: Author history (asymmetric: last=7, first=3) ──────────────────
+    # ── Step 3: Author history (last author only, 0–7 pts) ────────────────────
     last_author_journals: set[str] = set()
-    first_author_journals: set[str] = set()
-
     if last_author:
         last_author_journals = pubmed_author_journals(last_author)
-    if first_author and first_author != last_author:
-        first_author_journals = pubmed_author_journals(first_author)
 
     # ── Step 4: Select top 15 journals for deep scoring ───────────────────────
     top_jids = sorted(raw_scores, key=lambda x: raw_scores[x], reverse=True)[:15]
@@ -626,7 +677,7 @@ def analyze(abstract: str, first_author: str, last_author: str) -> dict:
         time.sleep(0.12)
         ref_data = get_ref(meta.get("name", ""))
 
-        # Similarity score (0–70): normalise embedding cosine sim to 0–70
+        # Similarity score (0–70)
         sim_score = (raw_scores[jid] / max_raw) * 70.0
 
         # Editorial / Call-for-Papers score (0–20)
@@ -637,11 +688,10 @@ def analyze(abstract: str, first_author: str, last_author: str) -> dict:
         ed_score_b  = topic_match * 10.0
         editorial_score = ed_score_a + ed_score_b
 
-        # Author history (0–10, asymmetric)
+        # Author history (0–10, last author only = 7 pts max)
         norm_name      = normalize_name(meta.get("name", ""))
         last_published = norm_name in last_author_journals
-        first_published = norm_name in first_author_journals
-        author_score = min(10, (7 if last_published else 0) + (3 if first_published else 0))
+        author_score   = 7 if last_published else 0
 
         total_score = sim_score + editorial_score + author_score
 
@@ -659,28 +709,33 @@ def analyze(abstract: str, first_author: str, last_author: str) -> dict:
         submission_url  = ref_data.get("submission_url") or homepage or ""
         timeline_weeks  = ref_data.get("timeline_weeks")
         acceptance_rate = ref_data.get("acceptance_rate", "See journal website")
+        word_limit      = ref_data.get("word_limit")
+
+        # Word count fit
+        wc_fit = compute_word_fit(word_count, word_limit)
 
         results.append({
-            "name":                 meta.get("name", "Unknown"),
-            "issn":                 issn,
-            "publisher":            publisher,
-            "homepage":             homepage,
-            "submission_url":       submission_url,
-            "is_oa":                is_oa,
-            "apc_usd":              apc_usd,
-            "h_index":              h_index,
-            "impact_factor":        impact_f,
-            "topics":               topics,
+            "name":                   meta.get("name", "Unknown"),
+            "issn":                   issn,
+            "publisher":              publisher,
+            "homepage":               homepage,
+            "submission_url":         submission_url,
+            "is_oa":                  is_oa,
+            "apc_usd":                apc_usd,
+            "h_index":                h_index,
+            "impact_factor":          impact_f,
+            "topics":                 topics,
             "last_author_published":  last_published,
-            "first_author_published": first_published,
-            "acceptance_rate":      acceptance_rate,
-            "timeline_weeks":       timeline_weeks,
-            "timeline_label":       f"~{timeline_weeks} weeks" if timeline_weeks else "See journal website",
-            "similarity_score":     round(sim_score, 1),
-            "editorial_score":      round(editorial_score, 1),
-            "author_score":         round(author_score, 1),
-            "total_score":          round(total_score, 1),
-            "similarity_method":    similarity_method,
+            "acceptance_rate":        acceptance_rate,
+            "timeline_weeks":         timeline_weeks,
+            "timeline_label":         f"~{timeline_weeks} weeks" if timeline_weeks else "See journal website",
+            "word_limit":             word_limit,
+            "word_fit":               wc_fit,
+            "similarity_score":       round(sim_score, 1),
+            "editorial_score":        round(editorial_score, 1),
+            "author_score":           round(author_score, 1),
+            "total_score":            round(total_score, 1),
+            "similarity_method":      similarity_method,
         })
 
     # ── Step 6: Normalise and categorise ──────────────────────────────────────
@@ -726,20 +781,34 @@ def index():
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    body         = request.get_json(force=True) or {}
-    abstract     = (body.get("abstract") or "").strip()
-    first_author = (body.get("first_author") or "").strip()
-    last_author  = (body.get("last_author") or "").strip()
+    body        = request.get_json(force=True) or {}
+    abstract    = (body.get("abstract") or "").strip()
+    last_author = (body.get("last_author") or "").strip()
+    word_count  = body.get("word_count")
+
+    if word_count is not None:
+        try:
+            word_count = int(word_count)
+            if word_count <= 0:
+                word_count = None
+        except (ValueError, TypeError):
+            word_count = None
 
     if not abstract:
         return jsonify({"error": "Abstract is required"}), 400
-    if len(abstract) < 80:
-        return jsonify({"error": "Please provide a complete abstract (at least 80 characters)"}), 400
+    if len(abstract) < 50:
+        return jsonify({"error": "Please provide a complete abstract (at least a few sentences)"}), 400
 
     try:
-        data = analyze(abstract, first_author, last_author)
+        data = analyze(abstract, last_author, word_count)
         if not data["results"]:
-            return jsonify({"error": "No matching journals found. Try a more detailed abstract."}), 404
+            return jsonify({
+                "error": (
+                    "No matching journals found. OpenAlex may not have papers indexed "
+                    "for this specific topic yet. Try rephrasing key terms in your abstract, "
+                    "or check your internet connection and try again."
+                )
+            }), 404
         return jsonify(data)
     except Exception as exc:
         import traceback; traceback.print_exc()

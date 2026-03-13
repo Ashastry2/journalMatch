@@ -14,6 +14,8 @@ Results show a scored bar chart, acceptance rates, submission-to-publication tim
 
 **Privacy first** — your abstract is never stored or logged. The app is fully stateless.
 
+> **This is a vibe coding project. This app was made using the ideas and suggestions by Amulya Shastry but coded by Claude Code. Please use this tool with the understanding that AI can make mistakes.**
+
 ---
 
 ## Try it online
@@ -127,7 +129,9 @@ journalmatch/
 - Abstracts are processed in memory only and never written to disk.
 - No database, no analytics, no third-party tracking.
 - HTTP headers (`Cache-Control: no-store`) prevent browser caching of your abstract.
-- External API calls go only to [OpenAlex](https://openalex.org) and [PubMed](https://pubmed.ncbi.nlm.nih.gov) (no abstract text is sent — only keyword queries).
+- **SPECTER embeddings** are computed entirely on the local machine — your abstract text never leaves for this step.
+- **OpenAlex** receives the first ~500 characters of your abstract as a search query to find topically similar published papers. OpenAlex is a non-profit open database run by [OurResearch](https://ourresearch.org). They may log API requests like any web server, but they are not a commercial entity and do not monetise your data. The abstract text is sent solely to retrieve relevant comparison papers.
+- **PubMed (NCBI)** receives only journal names and extracted keywords — no abstract text.
 
 ---
 
