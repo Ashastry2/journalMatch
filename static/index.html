@@ -6,6 +6,8 @@
 <title>JournalMatch — Find Your Best Journal</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -310,6 +312,26 @@ header p{color:var(--muted2);font-size:.95rem;max-width:500px;margin:0 auto}
 .tl-weeks{color:var(--teal);font-weight:600}
 .tl-line{flex:1;height:2px;background:var(--border);margin:0 .25rem;margin-top:-14px}
 
+/* ── Download bar ── */
+.download-bar{
+  display:flex;gap:.75rem;flex-wrap:wrap;
+  margin-bottom:1.5rem;align-items:center;
+}
+.btn-dl{
+  display:inline-flex;align-items:center;gap:.4rem;
+  padding:.45rem 1rem;border-radius:8px;font-size:.82rem;font-weight:600;
+  cursor:pointer;border:none;font-family:inherit;transition:opacity .2s,transform .1s;
+}
+.btn-dl:hover{opacity:.85;transform:translateY(-1px)}
+.btn-dl:active{transform:translateY(0)}
+.btn-dl.csv{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.4);color:var(--green)}
+.btn-dl.pdf{background:rgba(129,140,248,.15);border:1px solid rgba(129,140,248,.4);color:var(--purple)}
+.privacy-note{
+  font-size:.72rem;color:var(--muted);
+  background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);
+  border-radius:8px;padding:.4rem .8rem;line-height:1.5;
+}
+
 footer{
   text-align:center;padding:2rem 0 1rem;
   font-size:.75rem;color:var(--muted);
@@ -336,6 +358,9 @@ footer{
     <label>Abstract *</label>
     <textarea id="abstract" placeholder="Paste your complete abstract here..."></textarea>
     <div class="hint">Full abstract recommended — more text gives better topic matching. Short abstracts (150+ words) are supported.</div>
+    <div class="hint" style="margin-top:.5rem;color:#f59e0b;opacity:.85">
+      🔒 <strong>Privacy note:</strong> Your abstract text is sent to <a href="https://openalex.org" target="_blank" rel="noopener">OpenAlex</a> (a non-profit open academic database run by OurResearch) to search for topically similar papers. They log API requests like any web server but do not monetise your data. All SPECTER embedding computation happens locally on the server — your abstract is never sent to any commercial AI service.
+    </div>
   </div>
   <div class="author-row">
     <div class="form-group">
@@ -374,6 +399,13 @@ footer{
 <div id="results">
 
   <div class="summary-strip" id="summaryStrip"></div>
+
+  <!-- Download bar -->
+  <div class="download-bar">
+    <button class="btn-dl csv" onclick="downloadCSV()">⬇ Download CSV</button>
+    <button class="btn-dl pdf" onclick="downloadPDF()">⬇ Download PDF</button>
+    <span class="privacy-note">⚠ Results are not stored anywhere. Download your results before closing this tab.</span>
+  </div>
 
   <!-- Category summary -->
   <div class="category-cards">
@@ -441,14 +473,50 @@ footer{
 <footer>
   JournalMatch · Data from PubMed (NCBI), OpenAlex &amp; Crossref · For research guidance only<br>
   <span style="font-size:.7rem;margin-top:.3rem;display:block">This is a vibe coding project — ideas &amp; suggestions by Amulya Shastry, coded by Claude Code. AI can make mistakes; verify before submitting.</span>
+  <span id="usage-stats" style="font-size:.65rem;margin-top:.4rem;display:block;color:var(--muted)"></span>
 </footer>
 
 </div><!-- /page -->
 
 <script>
+// ── Security helpers ─────────────────────────────────────────────────────────
+// Escape HTML to prevent XSS when inserting untrusted data into innerHTML
+function esc(s) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(String(s == null ? '' : s)));
+  return d.innerHTML;
+}
+// Only allow http/https URLs — blocks javascript: and data: protocol injection
+function safeUrl(url) {
+  if (!url || url === '#') return '#';
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:' || u.protocol === 'http:') return url;
+  } catch (_) { /* relative or malformed — fall through */ }
+  return '#';
+}
+
+// ── Load usage stats on page load (read-only, no PII) ────────────────────────
+(function loadStats() {
+  fetch('/api/stats')
+    .then(r => r.ok ? r.json() : null)
+    .then(s => {
+      if (!s) return;
+      const el = document.getElementById('usage-stats');
+      if (el) {
+        el.textContent =
+          `👁 ${Number(s.page_visits).toLocaleString()} visits · `
+        + `🔬 ${Number(s.analyses_run).toLocaleString()} analyses run`;
+      }
+    })
+    .catch(() => { /* silently ignore — stats are non-critical */ });
+})();
+
 let chartInstance = null;
 let elapsedTimer = null;
 let startTime = null;
+let _lastResults = [];
+let _lastKeywords = [];
 const STEP_IDS = ['s1','s2','s3','s4','s5'];
 const STEP_DELAYS = [0, 8000, 18000, 28000, 38000];
 
@@ -524,8 +592,101 @@ async function runAnalysis() {
   }
 }
 
+function downloadCSV() {
+  if (!_lastResults.length) return;
+  const headers = [
+    'Rank','Journal','Publisher','Total Score','Category',
+    'Similarity /70','Editorial /20','Author /10',
+    'Impact Factor','H-Index','Open Access','APC (USD)',
+    'Acceptance Rate','Word Limit','Word Count Fit','Timeline (weeks)','Submission URL'
+  ];
+  const rows = _lastResults.map((r, i) => [
+    i + 1, r.name, r.publisher, r.total_score,
+    r.category.charAt(0).toUpperCase() + r.category.slice(1),
+    r.similarity_score, r.editorial_score, r.author_score,
+    r.impact_factor || '', r.h_index || '',
+    r.is_oa ? 'Yes' : 'No', r.apc_usd || '',
+    r.acceptance_rate,
+    r.word_limit || '',
+    r.word_fit && r.word_fit.status !== 'unknown' ? r.word_fit.label : '',
+    r.timeline_weeks || '', r.submission_url || ''
+  ]);
+  const csv = [headers, ...rows]
+    .map(row => row.map(c => `"${String(c).replace(/"/g,'""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'journalmatch_results.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadPDF() {
+  if (!_lastResults.length) return;
+  const {jsPDF} = window.jspdf;
+  const doc = new jsPDF({orientation: 'landscape', format: 'a4'});
+
+  doc.setFontSize(20);
+  doc.setTextColor(14, 148, 136);
+  doc.text('JournalMatch — Journal Recommendations', 14, 18);
+
+  doc.setFontSize(9);
+  doc.setTextColor(100, 116, 139);
+  doc.text(`Generated: ${new Date().toLocaleDateString()}`, 14, 25);
+  if (_lastKeywords.length) {
+    doc.text(`Keywords: ${_lastKeywords.join(', ')}`, 14, 30);
+  }
+
+  const tableRows = _lastResults.map((r, i) => [
+    i + 1,
+    r.name.length > 40 ? r.name.substring(0, 39) + '…' : r.name,
+    r.total_score + '/100',
+    r.category.charAt(0).toUpperCase() + r.category.slice(1),
+    r.similarity_score + '/70',
+    r.editorial_score + '/20',
+    r.author_score + '/10',
+    r.impact_factor || '—',
+    r.acceptance_rate || '—',
+    r.word_limit ? r.word_limit.toLocaleString() : '—',
+    r.word_fit && r.word_fit.status !== 'unknown' ? r.word_fit.label : '—',
+    r.timeline_weeks ? `~${r.timeline_weeks} wks` : '—',
+  ]);
+
+  doc.autoTable({
+    startY: 36,
+    head: [['#','Journal','Score','Category','Sim','Editorial','Author','IF','Accept.','Word Limit','WC Fit','Timeline']],
+    body: tableRows,
+    styles: {fontSize: 7.5, cellPadding: 2},
+    headStyles: {fillColor: [14, 148, 136], textColor: 255, fontStyle: 'bold'},
+    alternateRowStyles: {fillColor: [245, 247, 250]},
+    columnStyles: {
+      0: {cellWidth: 8},
+      1: {cellWidth: 58},
+      2: {cellWidth: 16},
+      3: {cellWidth: 18},
+    },
+    didParseCell(data) {
+      if (data.section === 'body' && data.column.index === 3) {
+        const val = data.cell.raw;
+        if (val === 'High')     data.cell.styles.textColor = [16, 185, 129];
+        if (val === 'Moderate') data.cell.styles.textColor = [245, 158, 11];
+        if (val === 'Low')      data.cell.styles.textColor = [59, 130, 246];
+      }
+    }
+  });
+
+  doc.setFontSize(7);
+  doc.setTextColor(150);
+  doc.text('JournalMatch · Data from PubMed & OpenAlex · For research guidance only. AI can make mistakes — verify before submitting.',
+    14, doc.internal.pageSize.getHeight() - 8);
+
+  doc.save('journalmatch_results.pdf');
+}
+
 function renderResults(data, wordCount) {
   const {results, keywords, total_similar_works} = data;
+  _lastResults = results;
+  _lastKeywords = keywords;
 
   // Summary strip
   const strip = document.getElementById('summaryStrip');
@@ -536,11 +697,11 @@ function renderResults(data, wordCount) {
     ? `<span class="summary-chip">📝 Manuscript: ${wordCount.toLocaleString()} words</span>`
     : '';
   strip.innerHTML = `
-    <span class="summary-chip">📄 ${total_similar_works} papers retrieved</span>
-    <span class="summary-chip">🏆 Top ${results.length} journals</span>
-    <span class="summary-chip" style="color:var(--teal)">${methodLabel}</span>
+    <span class="summary-chip">📄 ${esc(total_similar_works)} papers retrieved</span>
+    <span class="summary-chip">🏆 ${esc(results.length)} journals (up to 5 per tier)</span>
+    <span class="summary-chip" style="color:var(--teal)">${esc(methodLabel)}</span>
     ${wcChip}
-    ${keywords.map(k => `<span class="kw-chip">${k}</span>`).join('')}
+    ${keywords.map(k => `<span class="kw-chip">${esc(k)}</span>`).join('')}
   `;
 
   // Category counts
@@ -698,11 +859,22 @@ function scoreRing(score, cat, rank) {
 }
 
 function wordFitChip(wf, wordLimit) {
-  if (!wf || wf.status === 'unknown') return '';
-  const icons = {well_within: '✓✓', fits: '✓', over: '⚠'};
-  const classes = {well_within: 'chip wc-fit', fits: 'chip wc-ok', over: 'chip wc-over'};
-  const limitStr = wordLimit ? ` (limit: ${wordLimit.toLocaleString()})` : '';
-  return `<span class="${classes[wf.status]}">${icons[wf.status]} ${wf.label}</span>`;
+  if (!wf || wf.status === 'unknown') {
+    if (wordLimit) return `<span class="chip">📄 Word limit: ${Number(wordLimit).toLocaleString()} words</span>`;
+    return '';
+  }
+  if (wf.status === 'over') {
+    const over = wf.label.match(/(\d[\d,]+) words \((\d[\d,]+)/);
+    const yourWords  = over ? over[1] : '—';
+    const limitWords = wordLimit ? Number(wordLimit).toLocaleString() : '—';
+    return `<span class="chip wc-over" title="You will need to cut words before submitting to this journal">
+      ⚠ Over limit — this journal requires max ${limitWords} words. Your manuscript is ${yourWords} words. Consider cutting before submission.
+    </span>`;
+  }
+  const icons = {well_within: '✓✓', fits: '✓'};
+  const classes = {well_within: 'chip wc-fit', fits: 'chip wc-ok'};
+  const limitStr = wordLimit ? ` · limit: ${Number(wordLimit).toLocaleString()} words` : '';
+  return `<span class="${classes[wf.status]}">${icons[wf.status]} ${wf.label}${limitStr}</span>`;
 }
 
 function authorBadge(r) {
@@ -767,60 +939,60 @@ function renderCards(results) {
     `;
 
     group.forEach(r => {
-      const rank    = results.indexOf(r) + 1;
-      const simPct  = Math.round((r.similarity_score / 70) * 100);
-      const edPct   = Math.round((r.editorial_score / 20) * 100);
-      const auPct   = Math.round((r.author_score / 10) * 100);
-      const homepage  = r.homepage || '#';
-      const submitUrl = r.submission_url || r.homepage || '#';
+      const rank      = results.indexOf(r) + 1;
+      const simPct    = Math.round((r.similarity_score / 70) * 100);
+      const edPct     = Math.round((r.editorial_score / 20) * 100);
+      const auPct     = Math.round((r.author_score / 10) * 100);
+      const homepage  = safeUrl(r.homepage);
+      const submitUrl = safeUrl(r.submission_url || r.homepage);
 
       html += `
         <div class="journal-card ${g.cls}">
           <div class="score-col">${scoreRing(r.total_score, g.cls, rank)}</div>
           <div class="card-body">
             <div class="journal-name">
-              <a href="${homepage}" target="_blank" rel="noopener">${r.name}</a>
+              <a href="${homepage}" target="_blank" rel="noopener noreferrer">${esc(r.name)}</a>
             </div>
-            <div class="journal-meta">${r.publisher}${r.issn ? ' · ISSN ' + r.issn : ''}</div>
+            <div class="journal-meta">${esc(r.publisher)}${r.issn ? ' · ISSN ' + esc(r.issn) : ''}</div>
 
             <div class="score-bars">
               <div class="bar-row">
                 <span class="bar-label">Similarity</span>
                 <div class="bar-track"><div class="bar-fill sim" style="width:${simPct}%"></div></div>
-                <span class="bar-val">${r.similarity_score}<span style="color:var(--muted);font-size:.65rem">/70</span></span>
+                <span class="bar-val">${esc(r.similarity_score)}<span style="color:var(--muted);font-size:.65rem">/70</span></span>
               </div>
               <div class="bar-row">
                 <span class="bar-label">Editorial Fit</span>
                 <div class="bar-track"><div class="bar-fill ed" style="width:${edPct}%"></div></div>
-                <span class="bar-val">${r.editorial_score}<span style="color:var(--muted);font-size:.65rem">/20</span></span>
+                <span class="bar-val">${esc(r.editorial_score)}<span style="color:var(--muted);font-size:.65rem">/20</span></span>
               </div>
               <div class="bar-row">
                 <span class="bar-label">Author History</span>
                 <div class="bar-track"><div class="bar-fill au" style="width:${auPct}%"></div></div>
-                <span class="bar-val">${r.author_score}<span style="color:var(--muted);font-size:.65rem">/10</span></span>
+                <span class="bar-val">${esc(r.author_score)}<span style="color:var(--muted);font-size:.65rem">/10</span></span>
               </div>
             </div>
 
             <div class="chips">
-              ${r.h_index ? `<span class="chip">H-index: ${r.h_index}</span>` : ''}
-              ${r.impact_factor ? `<span class="chip">IF: ${r.impact_factor}</span>` : ''}
+              ${r.h_index ? `<span class="chip">H-index: ${esc(r.h_index)}</span>` : ''}
+              ${r.impact_factor ? `<span class="chip">IF: ${esc(r.impact_factor)}</span>` : ''}
               ${r.is_oa ? `<span class="chip oa">Open Access</span>` : '<span class="chip">Subscription</span>'}
-              ${r.apc_usd ? `<span class="chip paid">APC $${r.apc_usd.toLocaleString()}</span>` : ''}
+              ${r.apc_usd ? `<span class="chip paid">APC $${Number(r.apc_usd).toLocaleString()}</span>` : ''}
               ${authorBadge(r)}
               ${wordFitChip(r.word_fit, r.word_limit)}
             </div>
 
             ${r.topics.length ? `
               <div class="chips">
-                ${r.topics.map(t => `<span class="chip topic">${t}</span>`).join('')}
+                ${r.topics.map(t => `<span class="chip topic">${esc(t)}</span>`).join('')}
               </div>` : ''}
 
             ${timelineVisual(r.timeline_weeks)}
 
             <div class="bottom-row">
-              <span class="timeline-pill">⏱ ${r.timeline_label} submission→pub</span>
-              <span class="accept-pill">📊 Acceptance: ${r.acceptance_rate}</span>
-              <a href="${submitUrl}" target="_blank" rel="noopener" class="submit-btn">
+              <span class="timeline-pill">⏱ ${esc(r.timeline_label)} submission→pub</span>
+              <span class="accept-pill">📊 Acceptance: ${esc(r.acceptance_rate)}</span>
+              <a href="${submitUrl}" target="_blank" rel="noopener noreferrer" class="submit-btn">
                 Submission Guidelines →
               </a>
             </div>
@@ -854,25 +1026,26 @@ function wcFitCell(wf) {
 function renderTable(results) {
   const tbody = document.getElementById('reqBody');
   tbody.innerHTML = results.map((r, i) => {
-    const submitUrl = r.submission_url || r.homepage || '#';
+    const homeUrl   = safeUrl(r.homepage);
+    const submitUrl = safeUrl(r.submission_url || r.homepage);
     return `
       <tr>
         <td style="color:var(--muted)">${i+1}</td>
         <td>
-          <a href="${r.homepage || '#'}" target="_blank" rel="noopener" style="font-weight:600;color:var(--text)">${r.name}</a>
-          <br><span class="${catBadgeClass(r.category)}" style="font-size:.7rem">${catLabel(r.category)} Chance · ${r.total_score}/100</span>
+          <a href="${homeUrl}" target="_blank" rel="noopener noreferrer" style="font-weight:600;color:var(--text)">${esc(r.name)}</a>
+          <br><span class="${catBadgeClass(r.category)}" style="font-size:.7rem">${catLabel(r.category)} Chance · ${esc(r.total_score)}/100</span>
         </td>
-        <td style="color:var(--muted2)">${r.publisher || '—'}</td>
-        <td style="color:var(--muted);font-size:.75rem">${r.issn || '—'}</td>
-        <td>${r.impact_factor ? r.impact_factor : '—'}</td>
-        <td>${r.h_index || '—'}</td>
+        <td style="color:var(--muted2)">${esc(r.publisher) || '—'}</td>
+        <td style="color:var(--muted);font-size:.75rem">${esc(r.issn) || '—'}</td>
+        <td>${r.impact_factor ? esc(r.impact_factor) : '—'}</td>
+        <td>${r.h_index ? esc(r.h_index) : '—'}</td>
         <td class="${r.is_oa ? 'oa-yes' : 'oa-no'}">${r.is_oa ? '✓ Yes' : 'No'}</td>
-        <td>${r.apc_usd ? '$' + r.apc_usd.toLocaleString() : (r.is_oa ? 'Check site' : '—')}</td>
-        <td>${r.acceptance_rate}</td>
-        <td style="color:var(--muted2)">${r.word_limit ? r.word_limit.toLocaleString() + ' words' : '—'}</td>
+        <td>${r.apc_usd ? '$' + Number(r.apc_usd).toLocaleString() : (r.is_oa ? 'Check site' : '—')}</td>
+        <td>${esc(r.acceptance_rate)}</td>
+        <td style="color:var(--muted2)">${r.word_limit ? Number(r.word_limit).toLocaleString() + ' words' : '—'}</td>
         <td>${wcFitCell(r.word_fit)}</td>
-        <td>${r.timeline_label}</td>
-        <td><a href="${submitUrl}" target="_blank" rel="noopener" class="table-link">Guidelines →</a></td>
+        <td>${esc(r.timeline_label)}</td>
+        <td><a href="${submitUrl}" target="_blank" rel="noopener noreferrer" class="table-link">Guidelines →</a></td>
       </tr>
     `;
   }).join('');

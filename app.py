@@ -8,6 +8,9 @@ Word count: Manuscript length match against journal word limits
 
 import re
 import time
+import threading
+import json
+import pathlib
 from collections import defaultdict, Counter
 
 import numpy as np
@@ -29,6 +32,42 @@ except Exception as _e:
           "Using keyword fallback. Install sentence-transformers to enable SPECTER.")
 
 app = Flask(__name__, static_folder="static")
+
+# ── Privacy-safe usage counters ───────────────────────────────────────────────
+# Only two integers are ever stored — no IPs, no abstracts, no user data.
+# File persists across server restarts inside the HF Space container.
+_STATS_FILE = pathlib.Path("stats.json")
+_stats_lock = threading.Lock()          # prevents race conditions on concurrent requests
+
+def _read_stats() -> dict:
+    """Load stats from disk. Returns zeros if file missing or corrupt."""
+    try:
+        return json.loads(_STATS_FILE.read_text())
+    except Exception:
+        return {"page_visits": 0, "analyses_run": 0}
+
+def _increment_stat(field: str) -> None:
+    """Thread-safe increment of a single counter. No PII stored."""
+    with _stats_lock:
+        s = _read_stats()
+        s[field] = s.get(field, 0) + 1
+        _STATS_FILE.write_text(json.dumps(s))
+
+# ── Simple in-memory rate limiter (no extra dependency) ───────────────────────
+_rate_lock   = threading.Lock()
+_rate_data: dict[str, list[float]] = defaultdict(list)
+_RATE_MAX    = 10        # max requests per window per IP
+_RATE_WINDOW = 60.0     # seconds
+
+def _is_rate_limited(client_ip: str) -> bool:
+    now = time.time()
+    with _rate_lock:
+        history = _rate_data[client_ip]
+        _rate_data[client_ip] = [t for t in history if now - t < _RATE_WINDOW]
+        if len(_rate_data[client_ip]) >= _RATE_MAX:
+            return True
+        _rate_data[client_ip].append(now)
+        return False
 
 # ── API Endpoints ──────────────────────────────────────────────────────────────
 NCBI_BASE   = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -89,11 +128,11 @@ JOURNAL_REF = {
     },
     "proceedings of the national academy of sciences": {
         "acceptance_rate": "~17%", "timeline_weeks": 8, "word_limit": 6000,
-        "submission_url": "https://www.pnas.org/page/authors/submission",
+        "submission_url": "https://www.pnas.org/author-center",
     },
     "pnas": {
         "acceptance_rate": "~17%", "timeline_weeks": 8, "word_limit": 6000,
-        "submission_url": "https://www.pnas.org/page/authors/submission",
+        "submission_url": "https://www.pnas.org/author-center",
     },
     "immunity": {
         "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
@@ -153,11 +192,11 @@ JOURNAL_REF = {
     },
     "hepatology": {
         "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 5000,
-        "submission_url": "https://aasldpubs.onlinelibrary.wiley.com/hub/journal/15273350/homepage/forauthors.html",
+        "submission_url": "https://aasldpubs.onlinelibrary.wiley.com/hub/journal/15273350/homepage/forauthors",
     },
     "blood": {
         "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5000,
-        "submission_url": "https://www.hematology.org/publications/blood/authors",
+        "submission_url": "https://ashpublications.org/blood/pages/submission-guidelines",
     },
     "neuron": {
         "acceptance_rate": "~10%", "timeline_weeks": 10, "word_limit": 8000,
@@ -233,7 +272,7 @@ JOURNAL_REF = {
     },
     "genome research": {
         "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 8000,
-        "submission_url": "https://genome.cshlp.org/misc/ifora.shtml",
+        "submission_url": "https://genome.cshlp.org/site/misc/ifora.xhtml",
     },
     "american journal of human genetics": {
         "acceptance_rate": "~15%", "timeline_weeks": 8, "word_limit": 5500,
@@ -257,7 +296,7 @@ JOURNAL_REF = {
     },
     "diabetes": {
         "acceptance_rate": "~20%", "timeline_weeks": 8, "word_limit": 5000,
-        "submission_url": "https://diabetes.diabetesjournals.org/content/information-for-authors",
+        "submission_url": "https://diabetesjournals.org/diabetes/pages/author-guidelines",
     },
     "nature metabolism": {
         "acceptance_rate": "~8%", "timeline_weeks": 10, "word_limit": 5000,
@@ -272,6 +311,42 @@ JOURNAL_REF = {
         "submission_url": "https://www.cell.com/stem-cell-reports/authors",
     },
 }
+
+# ── Predatory / low-credibility publisher blocklist ───────────────────────────
+# Based on Beall's List, retraction watch data, and community consensus.
+# MDPI and Frontiers are excluded despite being borderline — many legitimate
+# researchers publish there, so they are NOT blocked.
+PREDATORY_PUBLISHERS = {
+    "omics international", "omics group", "omics publishing group",
+    "hirsute publishing", "herbert publications", "imedpub",
+    "scientific research publishing", "scirp",
+    "american journal experts", "science domain international",
+    "open access text", "remedy publications",
+    "insight medical publishing", "insight",
+    "jacobs publishers", "austin publishing group",
+    "lupine publishers", "crimson publishers",
+    "longdom publishing", "medwin publishers",
+    "peertechz", "scholink", "sci forschen",
+    "gavin publishers", "auctores publishing",
+    "pulsus group", "prime scholars",
+    "symbiosis group", "symbiosis online journals",
+    "internationales journal", "world journal",
+    "universal research publications",
+}
+
+PREDATORY_JOURNAL_KEYWORDS = {
+    "predatory", "scam journal", "fake impact factor",
+}
+
+def is_predatory(publisher: str, journal_name: str) -> bool:
+    pub = (publisher or "").lower().strip()
+    jn  = (journal_name or "").lower().strip()
+    if any(p in pub for p in PREDATORY_PUBLISHERS):
+        return True
+    if any(k in jn for k in PREDATORY_JOURNAL_KEYWORDS):
+        return True
+    return False
+
 
 BIOMEDICAL_STOP = {
     "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of",
@@ -665,17 +740,24 @@ def analyze(abstract: str, last_author: str, word_count: int | None) -> dict:
         last_author_journals = pubmed_author_journals(last_author)
 
     # ── Step 4: Select top 15 journals for deep scoring ───────────────────────
-    top_jids = sorted(raw_scores, key=lambda x: raw_scores[x], reverse=True)[:15]
+    top_jids = sorted(raw_scores, key=lambda x: raw_scores[x], reverse=True)[:25]
     max_raw  = raw_scores[top_jids[0]] if top_jids else 1.0
 
     # ── Step 5: Score each journal ────────────────────────────────────────────
     results: list[dict] = []
 
     for jid in top_jids:
-        meta     = oa_meta.get(jid, {})
+        meta      = oa_meta.get(jid, {})
+        publisher = meta.get("publisher", "") or ""
+        jname     = meta.get("name", "") or ""
+
+        # Skip predatory / low-credibility publishers
+        if is_predatory(publisher, jname):
+            continue
+
         src_data = openalex_source(jid)
         time.sleep(0.12)
-        ref_data = get_ref(meta.get("name", ""))
+        ref_data = get_ref(jname)
 
         # Similarity score (0–70)
         sim_score = (raw_scores[jid] / max_raw) * 70.0
@@ -746,17 +828,29 @@ def analyze(abstract: str, last_author: str, word_count: int | None) -> dict:
         if max_score > 0:
             scale = 88.0 / max_score
             for r in results:
-                r["total_score"]      = round(min(100, r["total_score"]      * scale), 1)
                 r["similarity_score"] = round(min(70,  r["similarity_score"] * scale), 1)
                 r["editorial_score"]  = round(min(20,  r["editorial_score"]  * scale), 1)
                 r["author_score"]     = round(min(10,  r["author_score"]     * scale), 1)
+                # Always derive total from its components so the breakdown always sums correctly
+                r["total_score"]      = round(
+                    r["similarity_score"] + r["editorial_score"] + r["author_score"], 1
+                )
+
+    # Re-sort after normalisation — component caps can shift relative totals
+    results.sort(key=lambda x: x["total_score"], reverse=True)
 
     for r in results:
         s = r["total_score"]
         r["category"] = "high" if s >= 65 else ("moderate" if s >= 45 else "low")
 
+    # Return up to 5 per tier so all categories are represented
+    high     = [r for r in results if r["category"] == "high"][:5]
+    moderate = [r for r in results if r["category"] == "moderate"][:5]
+    low      = [r for r in results if r["category"] == "low"][:5]
+    final    = high + moderate + low
+
     return {
-        "results":             results[:10],
+        "results":             final,
         "keywords":            keywords[:10],
         "total_similar_works": total_papers,
         "similarity_method":   similarity_method,
@@ -766,30 +860,69 @@ def analyze(abstract: str, last_author: str, word_count: int | None) -> dict:
 # ── Flask Routes ───────────────────────────────────────────────────────────────
 
 @app.after_request
-def privacy_headers(response):
-    """Prevent browsers from caching responses that contain abstract text."""
+def security_headers(response):
+    """Apply privacy and security headers to every response."""
+    # Caching — never cache pages that contain user data
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    response.headers["Pragma"] = "no-cache"
+    response.headers["Pragma"]        = "no-cache"
+    # Content sniffing protection
     response.headers["X-Content-Type-Options"] = "nosniff"
+    # X-Frame-Options omitted — HF Spaces embeds the app across origins
+    # (huggingface.co → username.hf.space), so any iframe restriction breaks it.
+    # HF Pro private space authentication is the access control layer instead.
+    # Referrer — don't leak URL to external requests
+    response.headers["Referrer-Policy"] = "no-referrer"
+    # HSTS — tell browsers to use HTTPS for 1 year (only effective behind HTTPS proxy)
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Permissions policy — disable features this app doesn't need
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # CORS — restrict to same origin only (no cross-origin API calls)
+    response.headers["Access-Control-Allow-Origin"] = ""
     return response
 
 
 @app.route("/")
 def index():
+    _increment_stat("page_visits")      # count visits — no IP or identity stored
     return send_from_directory("static", "index.html")
+
+
+@app.route("/api/stats", methods=["GET"])
+def api_stats():
+    """
+    Returns aggregate usage counters only. No personal data ever stored.
+    Read-only endpoint — no external party can write or manipulate counts.
+    Rate-limited to prevent polling abuse.
+    """
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    client_ip = client_ip.split(",")[0].strip()
+    if _is_rate_limited(client_ip):
+        return jsonify({"error": "Too many requests."}), 429
+    return jsonify(_read_stats())
 
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    body        = request.get_json(force=True) or {}
+    # ── Rate limiting ──────────────────────────────────────────────────────────
+    client_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown")
+    client_ip = client_ip.split(",")[0].strip()   # take only the first IP if proxied
+    if _is_rate_limited(client_ip):
+        return jsonify({"error": "Too many requests. Please wait a minute and try again."}), 429
+
+    # ── Parse and validate input ───────────────────────────────────────────────
+    body        = request.get_json(force=True, silent=True) or {}
     abstract    = (body.get("abstract") or "").strip()
     last_author = (body.get("last_author") or "").strip()
     word_count  = body.get("word_count")
 
+    # Strip control characters from text fields (defence-in-depth)
+    abstract    = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", abstract)
+    last_author = re.sub(r"[^a-zA-Z0-9 .,'-]", "", last_author)[:100]
+
     if word_count is not None:
         try:
             word_count = int(word_count)
-            if word_count <= 0:
+            if not (100 <= word_count <= 50000):
                 word_count = None
         except (ValueError, TypeError):
             word_count = None
@@ -798,6 +931,8 @@ def api_analyze():
         return jsonify({"error": "Abstract is required"}), 400
     if len(abstract) < 50:
         return jsonify({"error": "Please provide a complete abstract (at least a few sentences)"}), 400
+    if len(abstract) > 8000:
+        return jsonify({"error": "Abstract is too long (maximum 8,000 characters)"}), 400
 
     try:
         data = analyze(abstract, last_author, word_count)
@@ -809,10 +944,12 @@ def api_analyze():
                     "or check your internet connection and try again."
                 )
             }), 404
+        _increment_stat("analyses_run")  # count completed analyses — no PII stored
         return jsonify(data)
-    except Exception as exc:
+    except Exception:
         import traceback; traceback.print_exc()
-        return jsonify({"error": f"Analysis error: {exc}"}), 500
+        # Return a generic message — never expose internal exception details
+        return jsonify({"error": "An internal error occurred. Please try again."}), 500
 
 
 if __name__ == "__main__":
